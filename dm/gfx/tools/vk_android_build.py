@@ -300,6 +300,11 @@ if argv == ['--digest']: print(tools_digest()); sys.exit(0)
 if argv == ['--header']: open(HEADER_VK, 'w').write(header_text(vk_version())); print(vk_version()); sys.exit(0)
 if len(argv) < 4 or argv[0] != '--target' or argv[1] not in ('vulkan', 'android'): sys.exit(__doc__ or 'usage: vk_android_build.py --target vulkan <package dir> <output cache dir> [key...] | --header | --version')
 dm_dir, cache_root, want = argv[2], argv[3], set(argv[4:])
+_selected = os.environ.get('DM_SHADER_KEYS')
+if _selected:
+    with open(_selected) as _f:
+        want |= {c.lower() for line in _f if re.fullmatch(r'[0-9A-Fa-f]{16}', c := line.split('\t', 1)[0].strip())}
+    if not want: sys.exit(f'[RED] DM_SHADER_KEYS {_selected} names no shader keys')
 
 CHAIN = dmsh_chain.version(); VKV = vk_version(); TOOLS = tools_digest()
 if f'"{CHAIN}"' not in open(dmsh_chain.HEADER).read(): sys.exit(f'[RED] {dmsh_chain.HEADER} does not hold the current chain version {CHAIN}: run dmsh_chain.py --header first')

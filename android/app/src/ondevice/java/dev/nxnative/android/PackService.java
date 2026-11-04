@@ -415,6 +415,8 @@ public final class PackService extends Service {
         Files.write(log.toPath(), head.getBytes(StandardCharsets.UTF_8), java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
         int workers = Math.max(1, Runtime.getRuntime().availableProcessors() - 2);
         PackEngine.setenv("DM_GAME", j.titleId());
+        File seenShaders = new File(PackNative.repo(), "dm/games/" + j.titleId() + "/shader_seen.tsv");
+        PackEngine.setenv("DM_SHADER_KEYS", seenShaders.isFile() ? seenShaders.getPath() : "");
         PackEngine.setenv("DM_REWRITE_J", "1");
         PackEngine.setenv("NX_PACK_JOBS", String.valueOf(workers));
         PackEngine.setenv("J", s.equals("split") ? "1" : String.valueOf(workers));   // the split's J is its process pool: 1 = in this process
@@ -469,6 +471,7 @@ public final class PackService extends Service {
             while ((line = r.readLine()) != null) {
                 String[] c = line.split("\\t", -1);
                 if (c.length > 4 && c[0].endsWith(".bin")) keys.add(c[3]);
+                else if (c.length > 0 && c[0].matches("[0-9A-Fa-f]{16}")) keys.add(c[0].toLowerCase(Locale.ROOT));
             }
         }
         return keys;
@@ -484,7 +487,9 @@ public final class PackService extends Service {
         Set<String> missing;
         int required;
         try {
-            File want = new File(PackNative.repo(), "dm/games/" + j.titleId() + "/shader_map.tsv");
+            File profile = new File(PackNative.repo(), "dm/games/" + j.titleId());
+            File seen = new File(profile, "shader_seen.tsv");
+            File want = seen.isFile() ? seen : new File(profile, "shader_map.tsv");
             Set<String> wantKeys = shaderKeys(want);
             Set<String> haveKeys = shaderKeys(have);
             if (wantKeys.isEmpty()) return "cannot compare the dump's shaders with the app's list: the app's shader map has no keys";

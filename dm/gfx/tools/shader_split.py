@@ -123,6 +123,20 @@ def key_ctl(ctl):
 def skey(ctl, code):
     return hashlib.sha256(key_ctl(ctl) + code).hexdigest()[:16]
 
+def selected_shader_keys():
+    """The optional bounded on-device build: retain only keys named by this TSV."""
+    path = os.environ.get('DM_SHADER_KEYS')
+    if not path: return None
+    try:
+        with open(path) as f: keys = {c for line in f if re.fullmatch(r'[0-9A-Fa-f]{16}', c := line.split('\t', 1)[0].strip())}
+    except OSError as e:
+        red(f'cannot read DM_SHADER_KEYS {path}: {e}')
+    if not keys: red(f'DM_SHADER_KEYS {path} names no shader keys')
+    print(f'selective shader split: retaining {len(keys):,} listed keys', flush=True)
+    return {k.lower() for k in keys}
+
+SELECT_SHADER_KEYS = selected_shader_keys()
+
 def same_shader(a, b):
     """Two copies of one key hold the same shader: the code areas are equal, and so are the control sections up to their own length (control +0x20). Pokémon Legends: Z-A's UI layout archives
     (__ArchiveShader.bnsh inside the .truiv packs) give 104 KB control sections whose stage descriptor length runs 456 bytes past their own length, and those trailing bytes differ between copies"""
@@ -581,6 +595,8 @@ def glslc_chunk_shaders(chunks, label):
                 break
             one = bytes(buf[h:h + size])
             found = glslc_shaders(one, f'{label}#stream@{base + h:#x}', need=False)
+            if SELECT_SHADER_KEYS is not None:
+                found = [s for s in found if skey(s[2], s[3]) in SELECT_SHADER_KEYS]
             if not found:
                 pos = h + 1
                 continue
@@ -2961,7 +2977,10 @@ def scan_digest(argv, jobs, sources=None):
     """ScanCache's digest: the split's arguments and environment (with DM_PACKER_COMMIT, the app's commit on the phone), every job (with its file's size and
     modification time) and the content of the tools and the profile (digest_sources)"""
     h = hashlib.sha256()
-    h.update(repr((argv, [os.environ.get(k) for k in ('DM_GAME', 'DM_GLSLC_CAPTURE', 'DM_UE_SHADERS', 'DM_PACKER_COMMIT')])).encode())
+    h.update(repr((argv, [os.environ.get(k) for k in ('DM_GAME', 'DM_GLSLC_CAPTURE', 'DM_UE_SHADERS', 'DM_PACKER_COMMIT', 'DM_SHADER_KEYS')])).encode())
+    selected = os.environ.get('DM_SHADER_KEYS')
+    if selected and os.path.isfile(selected):
+        with open(selected, 'rb') as f: h.update(hashlib.sha256(f.read()).digest())
     for j in jobs:
         try: st = os.stat(j[0]); t = (st.st_size, st.st_mtime_ns)
         except OSError: t = None
