@@ -23,6 +23,7 @@ import android.os.RemoteException;
 import android.os.SystemClock;
 import android.util.Log;
 
+import java.io.BufferedReader;
 import java.io.File;
 import java.io.IOException;
 import java.io.RandomAccessFile;
@@ -32,8 +33,10 @@ import java.nio.file.StandardCopyOption;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -458,24 +461,48 @@ public final class PackService extends Service {
         return null;
     }
 
+    /** The shader keys in a split map, with the same row rule as scripts/pack_android.py. */
+    private static Set<String> shaderKeys(File map) throws IOException {
+        Set<String> keys = new HashSet<>();
+        try (BufferedReader r = Files.newBufferedReader(map.toPath(), StandardCharsets.UTF_8)) {
+            String line;
+            while ((line = r.readLine()) != null) {
+                String[] c = line.split("\\t", -1);
+                if (c.length > 4 && c[0].endsWith(".bin")) keys.add(c[3]);
+            }
+        }
+        return keys;
+    }
+
     /**
-     * null when the split found the shaders the app's profile lists (its shader_map.tsv byte for byte, as a Mac split of the same dump does), else what to do.
-     * vk_android_build.py builds the keys of the profile's map from the split's package: another map means a dump with other shaders (modified, or incomplete).
+     * null when the split contains every shader key required by the app's profile, else what to do.
+     * A split may contain extra shaders or number its records differently; vk_android_build.py resolves the profile's shaders by key.
      */
     private String splitMatchesProfile(Job j, File split) {
         if (engine.simulated()) return null;
         File have = new File(split, "shader_map.tsv");
+        Set<String> missing;
+        int required;
         try {
             File want = new File(PackNative.repo(), "dm/games/" + j.titleId() + "/shader_map.tsv");
-            if (java.util.Arrays.equals(Files.readAllBytes(want.toPath()), Files.readAllBytes(have.toPath()))) return null;
+            Set<String> wantKeys = shaderKeys(want);
+            Set<String> haveKeys = shaderKeys(have);
+            if (wantKeys.isEmpty()) return "cannot compare the dump's shaders with the app's list: the app's shader map has no keys";
+            required = wantKeys.size();
+            missing = new HashSet<>(wantKeys);
+            missing.removeAll(haveKeys);
+            if (missing.isEmpty()) {
+                if (!wantKeys.equals(haveKeys)) Log.i(TAG, "shader split has " + (haveKeys.size() - required) + " extra keys; all " + required + " profile keys are present");
+                return null;
+            }
         } catch (IOException | RuntimeException | UnsatisfiedLinkError e) {
             return "cannot compare the dump's shaders with the app's list: " + e.getMessage();
         }
         Job.deleteTree(split);   // a Retry splits again, from the start
         Job.deleteTree(j.splitScan(this));
         j.stepState("split", "pending");
-        return "the dump's shaders are not the ones this app knows for " + j.name() + " update " + j.version() + " (" + have.getName()
-                + " differs). The dump may be incomplete or modified: dump the game again, then Retry";
+        return "the dump lacks " + missing.size() + " of " + required + " shader keys required for " + j.name() + " update " + j.version()
+                + ". The dump may be incomplete or modified: dump the game again, then Retry";
     }
 
     /** Reads the step's log as it grows: progress lines into the job, the last [RED] line for a failure's message */
