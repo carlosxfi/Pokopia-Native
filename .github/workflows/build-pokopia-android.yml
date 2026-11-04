@@ -1,0 +1,90 @@
+# Build a Pokopia-only ARM64 Android bring-up APK. No game files, keys, dumps or extracted shaders are used.
+name: Build Pokopia Android APK
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [android]
+    paths:
+      - '.github/workflows/build-pokopia-android.yml'
+      - 'android/**'
+      - 'dm/games/0400A3A01EE4C000/**'
+      - 'dm/gfx/**'
+      - 'dm/host/**'
+      - 'dm/tools/**'
+      - 'scripts/pack_android.py'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pokopia-android-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  GAME: 0400A3A01EE4C000
+  NDK_VERSION: 28.2.13676358
+
+jobs:
+  build:
+    name: ARM64 APK
+    runs-on: macos-14
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Select Java 17
+        shell: bash
+        run: |
+          java_home=$(/usr/libexec/java_home -v 17)
+          echo "JAVA_HOME=$java_home" >> "$GITHUB_ENV"
+          echo "$java_home/bin" >> "$GITHUB_PATH"
+
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Install Android NDK
+        shell: bash
+        run: |
+          sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          test -x "$sdkmanager"
+          "$sdkmanager" "ndk;$NDK_VERSION"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+          echo "sdk.dir=$ANDROID_HOME" > android/app/local.properties
+
+      - name: Build the on-device packer
+        shell: bash
+        run: zsh android/ondevice/build.sh "$RUNNER_TEMP/nxpack"
+
+      - name: Build Pokopia bring-up APK
+        shell: bash
+        run: |
+          cd android/app
+          ./gradlew \
+            -PnxPackStage="$RUNNER_TEMP/nxpack/stage" \
+            -PnxGames="$GAME" \
+            -PnxApp=pokopia \
+            -PnxLabel="Pokopia Native test" \
+            apk
+
+      - name: Verify APK contents
+        shell: bash
+        run: |
+          apk="android/app/out/nxnative-android-pokopia.apk"
+          test -f "$apk"
+          unzip -l "$apk" | grep -F "lib/arm64-v8a/libnxhost_$GAME.so"
+          unzip -l "$apk" | grep -F "lib/arm64-v8a/libnxlaunch_$GAME.so"
+          shasum -a 256 "$apk" | tee "$apk.sha256"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pokopia-native-arm64-apk
+          path: |
+            android/app/out/nxnative-android-pokopia.apk
+            android/app/out/nxnative-android-pokopia.apk.sha256
+          if-no-files-found: error
+          retention-days: 14

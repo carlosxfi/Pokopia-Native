@@ -1,0 +1,9 @@
+# What Pokemon Pokopia needs of an Android phone during initial bring-up.
+# The format is documented in dm/games/README.md under "Readiness rows".
+# Keep this conservative until the first Odin 3 logs establish the actual Vulkan and memory requirements.
+
+status	bring-up
+
+# Pokopia's Switch 2 profile reserves a 9 GiB application pool. Android use has not been measured yet,
+# so the first supported test target is a 16 GB device (reported by Android as roughly 14-15 GiB).
+required	ram_gib	14	Memory: experimental bring-up currently targets a 16 GB Android device; lower-memory devices are untested

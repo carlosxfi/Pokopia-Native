@@ -123,6 +123,20 @@ def key_ctl(ctl):
 def skey(ctl, code):
     return hashlib.sha256(key_ctl(ctl) + code).hexdigest()[:16]
 
+def selected_shader_keys():
+    """The optional bounded on-device build: retain only keys named by this TSV."""
+    path = os.environ.get('DM_SHADER_KEYS')
+    if not path: return None
+    try:
+        with open(path) as f: keys = {c for line in f if re.fullmatch(r'[0-9A-Fa-f]{16}', c := line.split('\t', 1)[0].strip())}
+    except OSError as e:
+        red(f'cannot read DM_SHADER_KEYS {path}: {e}')
+    if not keys: red(f'DM_SHADER_KEYS {path} names no shader keys')
+    print(f'selective shader split: retaining {len(keys):,} listed keys', flush=True)
+    return {k.lower() for k in keys}
+
+SELECT_SHADER_KEYS = selected_shader_keys()
+
 def same_shader(a, b):
     """Two copies of one key hold the same shader: the code areas are equal, and so are the control sections up to their own length (control +0x20). Pokémon Legends: Z-A's UI layout archives
     (__ArchiveShader.bnsh inside the .truiv packs) give 104 KB control sections whose stage descriptor length runs 456 bytes past their own length, and those trailing bytes differ between copies"""
@@ -517,6 +531,82 @@ def idrk_data(d, a, b, flags, head=None):
         out.append(r); a += cs
     return b''.join(out)
 
+def idrk_chunks(d, a, b, flags):
+    """An IDRK entry in bounded pieces. Some Pokopia G2S entries inflate to several GB:
+    joining every 16 KB chunk before looking for GLSLC outputs can exhaust a 16 GB phone."""
+    import zlib
+    new, lz4b = flags & 0x400000, flags & 0x500000 == 0x500000
+    if not flags & 0x500000:
+        while a < b:
+            e = min(b, a + 1024 * 1024)
+            yield d[a:e]
+            a = e
+        return
+    while a + 4 <= b:
+        if new:
+            cs = struct.unpack_from('<H', d, a)[0]
+            a += 10
+        else:
+            cs = struct.unpack_from('<I', d, a)[0]
+            a += 4
+        if not cs: break
+        if a + cs > b: raise ValueError('IDRK chunk exceeds its entry')
+        if lz4b:
+            import lz4.block
+            yield lz4.block.decompress(d[a:a + cs], uncompressed_size=0x4000)
+        else:
+            yield zlib.decompress(d[a:a + cs])
+        a += cs
+
+def glslc_chunk_shaders(chunks, label):
+    """Find complete GLSLC outputs without retaining their enclosing multi-GB archive."""
+    magic = b'\x91\x68\x86\x19'
+    limit = int(os.environ.get('DM_GLSLC_STREAM_MAX', str(128 * 1024 * 1024)))
+    buf = bytearray()
+    base = pos = 0
+    out = []
+    for chunk in chunks:
+        buf.extend(chunk)
+        while True:
+            h = buf.find(magic, pos)
+            if h < 0:
+                keep = min(len(magic) - 1, len(buf))
+                drop = len(buf) - keep
+                if drop:
+                    del buf[:drop]
+                    base += drop
+                pos = 0
+                break
+            if len(buf) - h < 0x68:
+                if h:
+                    del buf[:h]
+                    base += h
+                pos = 0
+                break
+            size, _, _, _ = glslc_layout(buf, h)
+            if not 0 < size <= limit:
+                pos = h + 1
+                continue
+            if len(buf) - h < size:
+                if h:
+                    del buf[:h]
+                    base += h
+                pos = 0
+                break
+            one = bytes(buf[h:h + size])
+            found = glslc_shaders(one, f'{label}#stream@{base + h:#x}', need=False)
+            if SELECT_SHADER_KEYS is not None:
+                found = [s for s in found if skey(s[2], s[3]) in SELECT_SHADER_KEYS]
+            if not found:
+                pos = h + 1
+                continue
+            out.extend(found)
+            used = h + size
+            del buf[:used]
+            base += used
+            pos = 0
+    return out
+
 def idrk_shaders(path, label, out):
     """Koei Tecmo's KTGL keeps its shaders in G2S containers ('_S2G3000', type KTID 0x7bcd279f in Age of Calamity: 23,108 entries in three RDB files, 2.3 GB inflated), each a material's variations
     as GLSLC compiler outputs (glslc_shaders). One '_DOK0000' container (type KTID 0x20a6a0bb, the engine's system resources; once in system.rdb.bin and once in the update's .bin1) holds 151 bare
@@ -525,7 +615,8 @@ def idrk_shaders(path, label, out):
     from romfs import mmap
     with open(path, 'rb') as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as d:
         for a, b, flags in idrk_entries(d):
-            if idrk_data(d, a, b, flags, 4) in (b'_S2G', b'_DOK'): out.extend(glslc_shaders(idrk_data(d, a, b, flags), f'{label}#IDRK@{a:#x}', need=False))
+            if idrk_data(d, a, b, flags, 4) in (b'_S2G', b'_DOK'):
+                out.extend(glslc_chunk_shaders(idrk_chunks(d, a, b, flags), f'{label}#IDRK@{a:#x}'))
 
 G2S, SPKG = b'_S2G3000', b'SPKG'
 def kt_gz(d):
@@ -2886,7 +2977,10 @@ def scan_digest(argv, jobs, sources=None):
     """ScanCache's digest: the split's arguments and environment (with DM_PACKER_COMMIT, the app's commit on the phone), every job (with its file's size and
     modification time) and the content of the tools and the profile (digest_sources)"""
     h = hashlib.sha256()
-    h.update(repr((argv, [os.environ.get(k) for k in ('DM_GAME', 'DM_GLSLC_CAPTURE', 'DM_UE_SHADERS', 'DM_PACKER_COMMIT')])).encode())
+    h.update(repr((argv, [os.environ.get(k) for k in ('DM_GAME', 'DM_GLSLC_CAPTURE', 'DM_UE_SHADERS', 'DM_PACKER_COMMIT', 'DM_SHADER_KEYS')])).encode())
+    selected = os.environ.get('DM_SHADER_KEYS')
+    if selected and os.path.isfile(selected):
+        with open(selected, 'rb') as f: h.update(hashlib.sha256(f.read()).digest())
     for j in jobs:
         try: st = os.stat(j[0]); t = (st.st_size, st.st_mtime_ns)
         except OSError: t = None
