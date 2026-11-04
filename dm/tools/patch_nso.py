@@ -13,7 +13,7 @@
 #   Registered observation gates (OBS of the patch files, restricted by build ID): one instruction at the entry is replaced with "enter the host observation callback → execute the original instruction → jump back", so diagnostics modify zero code at runtime; listed in <name>.obs.tsv
 # The key page only stores "actual key number × 8" at the end of the data segment, and patch code fetches thread slots indirectly through the key page: the loader may use any key number.
 # Output: <name>.patched.bin (key page and patch area appended after the image at PATCH_OFF; when that would start beyond 112 MB the patch area sits before the base, see FAR; a text longer than a B reaches adds a second one after the image, see TWO), <name>.fixups.tsv (layout and key page index header), <name>.gates.tsv, <name>.sites.tsv, <name>.cuts.tsv, <name>.obs.tsv, <name>.changed.tsv (the text words whose instructions no longer run as the file has them)
-import struct, re, sys, os, glob, shlex, types, importlib.util, multiprocessing, signal
+import struct, re, sys, os, glob, shlex, types, importlib.util, multiprocessing, signal, functools
 from itertools import combinations
 import capstone
 if capstone.cs_version()[0] != 5:   # the rewriter uses Capstone 5's names (CS_ARCH_ARM64, ARM64_OP_*), which Capstone 6 renamed: see "Capstone API version" in docs/reference/rewriter.md
@@ -1388,10 +1388,13 @@ SPIN_PATHS, SPIN_STEPS, SPIN_STORES = 256, 4096, 4   # complete paths back to T;
 SPIN_LSE = ('ldadd', 'ldclr', 'ldeor', 'ldset', 'ldsmax', 'ldsmin', 'ldumax', 'ldumin')
 SPIN_BAD = {'bl', 'blr', 'br', 'ret', 'eret', 'svc', 'hvc', 'smc', 'brk', 'hlt', 'udf', 'mrs', 'msr', 'sys', 'sysl', 'wfe', 'wfi', 'sev', 'sevl', 'clrex', 'dc', 'ic', 'at',
             'tlbi', 'drps', 'dcps1', 'dcps2', 'dcps3', 'blraa', 'blrab', 'blraaz', 'blrabz', 'braa', 'brab', 'braaz', 'brabz', 'retaa', 'retab', 'eretaa', 'eretab'}
-spin_dec = {}
+# Capstone instruction objects are large. Pokopia's unusually large main can visit
+# enough distinct spin candidates to exhaust an Android app's memory if every decoded
+# instruction is retained. Keep desktop's unlimited cache, but bound Android to a
+# working set large enough for the 512-byte region scans.
+@functools.lru_cache(maxsize=16384 if TARGET == 'android' else None)
 def spin_ins(a):
-    if a not in spin_dec: spin_dec[a] = next(md.disasm(bytes(IMG[a:a + 4]), a), None)
-    return spin_dec[a]
+    return next(md.disasm(bytes(IMG[a:a + 4]), a), None)
 def spin_norm(n):
     n = {'fp': 'x29', 'lr': 'x30', 'wsp': 'sp'}.get(n, n)
     if n in ('wzr', 'xzr'): return None

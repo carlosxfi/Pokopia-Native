@@ -22,7 +22,7 @@
 # unfinished: the launcher refuses it, the next run rewrites it). Libraries of other versions in the pack's shaders/ are kept.
 # --code-only rewrites the modules and stops (pack.tsv, game.tsv and the shaders untouched); --keep-code packs without rewriting (the phone's two steps).
 # Usage: pack_android.py <game folder> [--version N] [--out DIR] [-j N] [--shader-cache DIR] [--shader-pkg DIR] [--shader-python PY] [-J N] [--no-shaders] [--code-only | --keep-code] [--in-process]   (exit 1 on error)
-import argparse, hashlib, os, runpy, shutil, subprocess, sys, time
+import argparse, gc, hashlib, os, runpy, shutil, subprocess, sys, time
 from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / 'scripts')); sys.path.insert(0, str(REPO / 'dm/games'))
@@ -78,6 +78,9 @@ def run_in_process(script, args, env, log):
             std = os.path.realpath(sys.base_prefix) + os.sep
             for m in set(sys.modules) - mods:
                 if not os.path.realpath(getattr(sys.modules.get(m), '__file__', None) or '').startswith(std): sys.modules.pop(m, None)
+            # In-process Android retries share one app process; promptly release the
+            # rewriter's large image and decoded-instruction object graph.
+            gc.collect()
     return code
 
 
